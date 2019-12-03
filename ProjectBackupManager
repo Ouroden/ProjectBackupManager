@@ -1,0 +1,68 @@
+#!/bin/bash
+
+function getRepoUrl()
+{
+  echo $(svn info 2> /dev/null | grep ^URL | awk '{ print $2}')
+}
+
+function getRepo()
+{
+  echo $(getRepoUrl) | grep -oP '(?<=svnroot/).*?(?=/)'
+}
+
+function getBranch()
+{
+  echo $(getRepoUrl) | grep -oP '\w+$'
+}
+
+main()
+{
+  backup_dir="${HOME}/.projects_backup_dir"
+  repo=$(getRepo)
+  branch=$(getBranch)
+  sleep_time=60
+
+  mkdir -p ${backup_dir}
+
+  printf "Saving svn diff in 1 min interval...\n\nRepo: ${repo}\nBranch: ${branch}\nBackup dir: ${backup_dir}\n\n"
+
+  while true; do
+    diffname="${backup_dir}/${repo}-${branch}-`date +%Y-%m-%d-%H%M`"
+    svn diff > ${diffname}
+    diffsize=`ls -l ${diffname} | awk '{print $5}'`
+
+    if ! (( diffsize )); then
+      #echo "Diff empty - removing"
+      rm ${diffname}; sleep ${sleep_time}; continue
+    fi
+
+    echo "Diff created: ${diffname}"
+    last_diffname=${diffname}
+    sleep ${sleep_time}
+    break
+  done
+
+  while true; do
+    diffname="${backup_dir}/${repo}-${branch}-`date +%Y-%m-%d-%H%M%S`"
+    svn diff > ${diffname}
+    diffsize=`ls -l ${diffname} | awk '{print $5}'`
+
+    if ! (( diffsize )); then
+      #echo "Diff empty - removing"
+      rm ${diffname}; sleep ${sleep_time}; continue
+    fi
+
+    compare_cmd="cmp --silent ${diffname} ${last_diffname}"
+    $(${compare_cmd}); diffs_different=$?
+    if ! (( diffs_different )); then
+      #echo "Diff same as last - removing"
+      rm ${diffname}; sleep ${sleep_time}; continue;
+    fi
+
+    echo "Diff created: ${diffname}"
+    last_diffname=${diffname}
+    sleep ${sleep_time}
+  done
+}
+
+main "$@"
