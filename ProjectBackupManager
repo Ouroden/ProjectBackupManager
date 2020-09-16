@@ -1,67 +1,231 @@
 #!/bin/bash
 
+function usage()
+{
+  echo ""
+  echo "This tool lets you:"
+  echo "    - backup projects in BACKUP_DIR"
+  echo "    - diff is created in SLEEP_TIME intervals"
+  echo "    - diff is not created if empty"
+  echo "    - diff is not created if it has not changed"
+  echo "Usage: $0 [-c BACKUP_CONFIG_FILE] [-v] [-h]"
+  echo "Register project:"
+  echo "    -a, --add_project"
+  echo "                      add current project to automatic backup and exit"
+  echo "    -r, --remove_project"
+  echo "                      remove current project from automatic backup and exit"
+  echo "Backup arguments:"
+  echo "    -b, --backup_dir BACKUP_DIR"
+  echo "                      path to backup directory"
+  echo "    -d, --project_dir PROJECT_ROOT"
+  echo "                      project to backup, can be used multiple times"
+  echo "    -c, --config_file BACKUP_CONFIG_FILE"
+  echo "                      path to custom config file with projects path to backup"
+  echo "    -t, --sleep_time SLEEP_TIME"
+  echo "                      frequency of backup in seconds"
+  echo "Miscellaneous arguments:"
+  echo "    -k, --kill"
+  echo "                      kill all backup processes"
+  echo "    -v, --verbose"
+  echo "                      print additional logs"
+  echo "    -h, --help"
+  echo "                      show this help message and exit"
+}
+
+function log_info()
+{
+  if (( verbose )); then printf "$1\n"; fi
+}
+
+function log_error()
+{
+  printf "Error: $0: $1\n"
+}
+
 function getRepoUrl()
 {
-  echo $(svn info 2> /dev/null | grep ^URL | awk '{ print $2}')
+  local _project_dir=$1
+  echo $(svn info ${_project_dir} 2> /dev/null | grep ^URL | awk '{ print $2}')
 }
 
 function getRepo()
 {
-  echo $(getRepoUrl) | grep -oP '(?<=svnroot/).*?(?=/)'
+  local _project_dir=$1
+  echo $(getRepoUrl ${_project_dir}) | grep -oP '(?<=svnroot/).*?(?=/)'
 }
 
 function getBranch()
 {
-  echo $(getRepoUrl) | grep -oP '\w+$'
+  local _project_dir=$1
+  echo $(getRepoUrl ${_project_dir}) | grep -oP '\w+$'
 }
 
-main()
+function backup_project()
 {
-  backup_dir="${HOME}/.projects_backup_dir"
-  repo=$(getRepo)
-  branch=$(getBranch)
-  sleep_time=60
+  local _project_dir=$1
+  local _backup_dir=$2
+  local _sleep_time=$3
+
+  local repo=$(getRepo ${_project_dir})
+  local branch=$(getBranch ${_project_dir})
+
+  log_info "Saving svn diff in 1 min interval...\n\nRepo: ${repo} Branch: ${branch}\nBackup dir: ${_backup_dir}\n\n"
 
   mkdir -p ${backup_dir}
 
-  printf "Saving svn diff in 1 min interval...\n\nRepo: ${repo}\nBranch: ${branch}\nBackup dir: ${backup_dir}\n\n"
-
   while true; do
-    diffname="${backup_dir}/${repo}-${branch}-`date +%Y-%m-%d-%H%M`"
-    svn diff > ${diffname}
+    diffname="${_backup_dir}/${repo}-${branch}-`date +%Y-%m-%d-%H%M%S`"
+    svn diff ${_project_dir} > ${diffname}
     diffsize=`ls -l ${diffname} | awk '{print $5}'`
 
     if ! (( diffsize )); then
-      #echo "Diff empty - removing"
-      rm ${diffname}; sleep ${sleep_time}; continue
+      log_info "${_project_dir} Diff empty - removing"
+      rm ${diffname}; sleep ${_sleep_time}; continue
     fi
 
-    echo "Diff created: ${diffname}"
+    log_info "${_project_dir} Diff created: ${diffname}"
     last_diffname=${diffname}
-    sleep ${sleep_time}
+    sleep ${_sleep_time}
     break
   done
 
   while true; do
-    diffname="${backup_dir}/${repo}-${branch}-`date +%Y-%m-%d-%H%M%S`"
-    svn diff > ${diffname}
+    diffname="${_backup_dir}/${repo}-${branch}-`date +%Y-%m-%d-%H%M%S`"
+    svn diff ${_project_dir} > ${diffname}
     diffsize=`ls -l ${diffname} | awk '{print $5}'`
 
     if ! (( diffsize )); then
-      #echo "Diff empty - removing"
-      rm ${diffname}; sleep ${sleep_time}; continue
+      log_info "${_project_dir} Diff empty - removing"
+      rm ${diffname}; sleep ${_sleep_time}; continue
     fi
 
     compare_cmd="cmp --silent ${diffname} ${last_diffname}"
     $(${compare_cmd}); diffs_different=$?
     if ! (( diffs_different )); then
-      #echo "Diff same as last - removing"
-      rm ${diffname}; sleep ${sleep_time}; continue;
+      log_info "${_project_dir} Diff same as last - removing"
+      rm ${diffname}; sleep ${_sleep_time}; continue;
     fi
 
-    echo "Diff created: ${diffname}"
+    log_info "${_project_dir} Diff created: ${diffname}"
     last_diffname=${diffname}
-    sleep ${sleep_time}
+    sleep ${_sleep_time}
+  done
+
+}
+
+function parse_arguments()
+{
+  OPTS=$(getopt -o arkb:d:c:t:vh --long add_project,remove_project,kill,backup_dir:,project_dir:,config_file:,sleep_time:,verbose,help -n 'parse-options' -- "$@")
+  if [ $? != 0 ] ; then log_error "Parsing options failed." >&2 ; exit 1 ; fi
+
+  log_info "echo $OPTS"
+  eval set -- "$OPTS"
+
+  while true; do
+    case "$1" in
+      -a | --add_project    ) add_project=1;            shift ;;
+      -r | --remove_project ) remove_project=1;         shift ;;
+      -k | --kill           ) kill_processes=1;         shift ;;
+      -b | --backup_dir     ) backup_dir="$2";          shift 2 ;;
+      -d | --project_dir    ) project_dirs+=("$2");     shift 2 ;;
+      -c | --config_file    ) backup_config_file="$2";  shift 2 ;;
+      -t | --sleep_time     ) sleep_time="$2";          shift 2 ;;
+      -v | --verbose        ) verbose=1;                shift ;;
+      -h | --help           ) usage && exit 1 ;;
+      -- ) shift; break ;;
+      * ) break ;;
+    esac
+  done
+
+  if [ -z "${backup_dir}" ]; then
+    backup_dir="${HOME}/.projects_backup_dir.${server}"
+    log_info 'BACKUP_DIR         is not set, using: '${backup_dir}
+  fi
+
+  if [ -z "${backup_config_file}" ]; then
+    backup_config_file=${HOME}/.project_backup_manager_config.${server}
+    touch ${backup_config_file}
+    log_info "BACKUP_CONFIG_FILE is not set, using: ${backup_config_file}"
+  fi
+
+  if [ -z "${sleep_time}" ]; then
+    sleep_time=60
+    log_info "SLEEP_TIME         is not set, using: ${sleep_time}s"
+  fi
+
+  if [ -z ${project_dirs} ]; then
+    readarray -t project_dirs < ${backup_config_file}
+
+    log_info "PROJECT_ROOT(s) not set, loading from config_file: ${backup_config_file}"
+  fi
+
+  log_info "\nprojects_to_add: ${projects_to_add[*]}"
+  log_info "projects_to_remove: ${projects_to_remove[*]}"
+  log_info "backup_dir: ${backup_dir}"
+  log_info "project_dirs: ${project_dirs[*]}"
+  log_info "config_file: ${backup_config_file}"
+  log_info "sleep_time: ${sleep_time}"
+  log_info "verbose: ${verbose}\n\n"
+}
+
+function register_project()
+{
+  local _project_dir=$1
+  grep --silent ^${_project_dir}$ ${backup_config_file}; not_registered=$?
+  if (( not_registered )); then
+    echo "${_project_dir}" >> ${backup_config_file}
+  fi
+}
+
+function unregister_project()
+{
+  local _project_dir=$1
+  sed -i "\,^${_project_dir}$,d" ${backup_config_file}
+}
+
+function kill_backup_processes()
+{
+  check_if_already_running || { echo "There are no running backup processes"; exit 1; }
+
+  printf "Sending kill -9 to:\n"
+  ps x | grep "/bin/bash.*ProjectBackupManager" | grep -v $$ | grep -v "grep"
+
+  ps x | grep "/bin/bash.*ProjectBackupManager" | grep -v $$ | grep -v "grep" | awk '{print $1}' | xargs kill -9
+}
+
+function execute_special_operations() {
+    if (( add_project ));     then register_project ${PWD};       exit $?; fi
+    if (( remove_project ));  then unregister_project ${PWD};     exit $?; fi
+    if (( kill_processes ));  then kill_backup_processes ${PWD};  exit $?; fi
+}
+
+function check_if_already_running()
+{
+  ps x | grep "/bin/bash.*ProjectBackupManager" | grep -v $$ | grep -v "grep" > /dev/null; not_running=$?
+  return ${not_running}
+}
+
+function check_if_any_project_registered()
+{
+  if [ -z ${project_dirs} ]; then
+    printf "\nThere aren't any registered project in: ${backup_config_file}\n"
+    printf "You can register one using -a/--add_project flag from project dir.\n"
+    printf "$0 --add_project\n\n"
+  fi
+}
+
+main()
+{
+  server=`echo $HOSTNAME | awk -F. '{print $1}'`
+  parse_arguments "$@"
+  execute_special_operations
+
+  check_if_any_project_registered
+  check_if_already_running && echo "Already running" && exit 0;
+
+  for project_dir in "${project_dirs[@]}"; do
+    printf "Start backup of: ${project_dir}\nBackup dir: ${backup_dir}\nDiff interval: ${sleep_time}s\n\n"
+    (backup_project ${project_dir} ${backup_dir} ${sleep_time}) &
   done
 }
 
